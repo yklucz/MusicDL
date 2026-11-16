@@ -1,0 +1,20 @@
+{
+  "downloadsDir": "~/Music/MusicDL/Downloads",
+  "libraryDirs": ["~/Music/MusicDL/Library"],
+  "format": "mp3",
+  "filenameTemplate": "{title} - {artist}",
+  "structure": "flat",
+  "concurrency": 2,
+  "maxRetries": 3,
+  "retryBaseMs": 1000,
+  "largeBatchThreshold": 20,
+  "theme": "aurora",
+  "createPlaylist": false,
+  "allowLocalUrls": false,
+  "tools": {
+    "ytdlp": "yt-dlp",
+    "spotdl": "spotdl",
+    "ffmpeg": "ffmpeg",
+    "ffprobe": "ffprobe"
+  }
+}

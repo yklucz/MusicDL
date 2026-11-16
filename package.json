@@ -1,0 +1,54 @@
+{
+  "name": "musicdl",
+  "version": "1.0.0",
+  "description": "A terminal music downloader and independent music library manager",
+  "type": "module",
+  "bin": {
+    "musicdl": "bin/musicdl.mjs"
+  },
+  "engines": {
+    "node": ">=24.12.0"
+  },
+  "packageManager": "pnpm@12.21.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run tests/integration.test.ts",
+    "dev": "tsx src/cli.ts",
+    "start": "node bin/musicdl.mjs",
+    "setup": "node scripts/setup.mjs",
+    "setup:tools": "node scripts/setup-tools.mjs",
+    "format": "prettier --write src tests scripts bin *.json *.ts *.yaml docs README.md .github",
+    "format:check": "prettier --check src tests scripts bin *.json *.ts *.yaml docs README.md .github",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "scripts",
+    "README.md",
+    "config.example.json",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@clack/prompts": "^1.9.0",
+    "commander": "^15.1.0",
+    "ink": "^8.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "ink-testing-library": "^4.0.0",
+    "prettier": "^3.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "license": "MIT",
+  "private": true
+}
