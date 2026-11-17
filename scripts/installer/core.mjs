@@ -355,7 +355,7 @@ export async function ensurePnpm(o) {
         Buffer.from(integrity.slice(7), 'base64').toString('hex'),
         o.download,
       );
-      await requireRun(o, 'tar', ['-xzf', archive, '-C', staging]);
+      await requireRun({ ...o, root: staging }, 'tar', ['-xzf', 'pnpm.tgz', '-C', '.']);
       await rm(archive);
       await rename(staging, directory);
     } finally {

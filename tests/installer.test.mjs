@@ -873,3 +873,67 @@ test(
       await install(options);
     }),
 );
+
+test('native tar extracts the verified pnpm archive under a Unicode staging cwd using ASCII arguments', () =>
+  fixture(async (f) => {
+    const source = path.join(f.base, 'archive source 二');
+    await mkdir(path.join(source, 'package'), { recursive: true });
+    await writeFile(
+      path.join(source, 'package', 'package.json'),
+      JSON.stringify({ name: '@pnpm/exe.win32-x64', version: '12.21.0' }),
+    );
+    const payload = 'controlled native package payload';
+    await writeFile(path.join(source, 'package', 'pnpm.exe'), payload);
+    const created = spawnSync('tar', ['-czf', 'fixture.tgz', 'package'], {
+      cwd: source,
+      encoding: 'utf8',
+    });
+    assert.equal(created.status, 0, created.stderr);
+    const bytes = await readFile(path.join(source, 'fixture.tgz'));
+    const options = {
+      ...f,
+      platform: 'win32',
+      arch: 'x64',
+      node: process.execPath,
+      mode: 'install',
+      env: process.env,
+      download: async (url) =>
+        url === 'https://registry.npmjs.org/pnpm/12.21.0'
+          ? Buffer.from(
+              JSON.stringify({ optionalDependencies: { '@pnpm/exe.win32-x64': '12.21.0' } }),
+            )
+          : url.endsWith('/12.21.0')
+            ? Buffer.from(
+                JSON.stringify({
+                  dist: {
+                    tarball:
+                      'https://registry.npmjs.org/@pnpm/exe.win32-x64/-/exe.win32-x64-12.21.0.tgz',
+                    integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+                  },
+                }),
+              )
+            : bytes,
+      exec: async (command, args, invocation) => {
+        if (command === 'tar') {
+          assert.deepEqual(args, ['-xzf', 'pnpm.tgz', '-C', '.']);
+          assert.ok(path.basename(invocation.root).startsWith('pnpm-download-'));
+          const child = spawnSync(command, args, {
+            cwd: invocation.root,
+            env: invocation.env,
+            encoding: 'utf8',
+          });
+          return { status: child.status, stdout: child.stdout, stderr: child.stderr };
+        }
+        assert.equal(path.basename(command), 'pnpm.exe');
+        assert.equal(await readFile(command, 'utf8'), payload);
+        return { status: 0, stdout: '12.21.0\n' };
+      },
+    };
+    const result = await ensurePnpm(options);
+    assert.equal(await readFile(result.command, 'utf8'), payload);
+    assert.deepEqual(await readdir(path.join(f.root, '.tools')), ['pnpm-native-12.21.0-win32-x64']);
+    options.download = async () => {
+      throw Error('Existing package must be reused');
+    };
+    assert.equal((await ensurePnpm(options)).command, result.command);
+  }));

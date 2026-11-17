@@ -54,4 +54,6 @@ The first remote installation checks exposed a public GitHub API rate limit whil
 
 The native Windows full installer also exposed mixed-case `Path` loss when cloning environment variables. Windows environment keys are now merged case-insensitively, retaining existing media-tool discovery and explicit overrides without changing caller or global state. A native command-discovery regression supplements the full installer check.
 
-Final local verification: strict source/test typechecks, production build and Prettier passed; 154 tests passed and three native-Windows-only tests were skipped on macOS, across 15 suites. Bash syntax/help and installer smoke-script syntax checks passed. Final remote CI results are reported with the delivered commit.
+The Unicode Windows installation check exposed the native tar program's handling of absolute non-ASCII paths. Verified pnpm archives now extract with the staging directory as the child working directory and ASCII relative arguments. A real archive extraction/reuse/cleanup regression runs on every platform.
+
+Final local verification: strict source/test typechecks, production build and Prettier passed; 155 tests passed and three native-Windows-only tests were skipped on macOS, across 15 suites. Bash syntax/help and installer smoke-script syntax checks passed. Final remote CI results are reported with the delivered commit.
