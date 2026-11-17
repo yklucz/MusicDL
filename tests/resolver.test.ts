@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { writeFile } from 'node:fs/promises';
 import { Resolver, selectTracks } from '../src/resolver.js';
 import { ytDownloadArgs } from '../src/providers/ytdlp.js';
+import { spotifyMetadata } from '../src/providers/metadata.js';
 import { validateUrl, safeSegment } from '../src/core/safety.js';
 import type { Runner, RunOptions, RunResult } from '../src/core/process.js';
 import type { PromptPort } from '../src/prompts.js';
@@ -10,7 +12,12 @@ class MetadataRunner implements Runner {
   constructor(private readonly data: (args: string[]) => unknown) {}
   async run(_command: string, args: string[], _options?: RunOptions): Promise<RunResult> {
     this.calls.push(args);
-    return { stdout: JSON.stringify(this.data(args)), stderr: '' };
+    const data = this.data(args);
+    if (args[0] === 'save') {
+      await writeFile(args[args.indexOf('--save-file') + 1]!, JSON.stringify(data));
+      return { stdout: '', stderr: '' };
+    }
+    return { stdout: JSON.stringify(data), stderr: '' };
   }
 }
 const video = {
@@ -53,6 +60,7 @@ describe('universal input', () => {
       disc_number: 1,
       track_number: 1,
       list_position: 1,
+      list_length: 2,
       url: 'https://open.spotify.com/track/1234567890123456789012',
     };
     const second = {
@@ -63,9 +71,13 @@ describe('universal input', () => {
       url: 'https://open.spotify.com/track/abcdefghijklmnopqrstuv',
     };
     for (const kind of ['album', 'playlist']) {
-      const result = await new Resolver(new MetadataRunner(() => [second, first]), tools).resolve(
-        `https://open.spotify.com/${kind}/abcdefghijklmnopqrstuv`,
-      );
+      const url = `https://open.spotify.com/${kind}/abcdefghijklmnopqrstuv`;
+      // Albums still use the CLI. Keep testing its playlist normalization too;
+      // production playlists now use the independently tested complete-page SDK path.
+      const result =
+        kind === 'playlist'
+          ? spotifyMetadata([second, first], 'playlist', url)
+          : await new Resolver(new MetadataRunner(() => [second, first]), tools).resolve(url);
       if (result.kind !== 'collection') throw new Error('Expected collection');
       expect(result.collection.tracks.map((track) => track.title)).toEqual(['First', 'Second']);
     }
@@ -218,6 +230,7 @@ describe('universal input', () => {
         name: 'Song',
         artists: ['Artist'],
         album_name: 'Release',
+        list_length: 1,
         url: 'https://open.spotify.com/track/1234567890123456789012',
       },
     ]);

@@ -10,4 +10,6 @@ export interface PromptPort {
   confirm(message: string, initial?: boolean): Promise<boolean>;
   text(message: string, initial?: string): Promise<string>;
   note(message: string): void;
+  progress?: MetadataReporter;
 }
+import type { MetadataReporter } from './providers/spotify.js';

@@ -57,6 +57,7 @@ export async function confirmBatch(
 }
 export class MusicDL {
   readonly operations = new AbortController();
+  private inputOperation: AbortController | undefined;
   private closed = false;
   readonly resolver: Resolver;
   readonly audio: AudioProcessor;
@@ -101,6 +102,31 @@ export class MusicDL {
     flags: DownloadFlags,
     prompts: PromptPort,
   ): Promise<{ added: number; skipped: number }> {
+    if (this.inputOperation)
+      throw new MusicDLError('Another input is still being resolved.', 'BUSY');
+    const operation = new AbortController();
+    this.inputOperation = operation;
+    try {
+      return await this.resolveSelection(
+        input,
+        flags,
+        prompts,
+        AbortSignal.any([this.operations.signal, operation.signal]),
+      );
+    } finally {
+      this.inputOperation = undefined;
+      prompts.progress?.(undefined);
+    }
+  }
+  cancelInput(): void {
+    this.inputOperation?.abort();
+  }
+  private async resolveSelection(
+    input: string,
+    flags: DownloadFlags,
+    prompts: PromptPort,
+    signal: AbortSignal,
+  ): Promise<{ added: number; skipped: number }> {
     if (flags.single && flags.playlist)
       throw new MusicDLError('--single and --playlist cannot be used together.', 'SELECTION');
     const parsed = splitInput(input),
@@ -109,7 +135,9 @@ export class MusicDL {
     if (parsed.urls) {
       for (const url of parsed.urls) {
         prompts.note('Reading provider metadata…');
-        const resolved = await this.resolver.resolve(url, this.operations.signal);
+        const resolved = await this.resolver.resolve(url, signal, (value) =>
+          prompts.progress?.(value),
+        );
         if (resolved.kind !== 'collection') {
           const track = resolved.track;
           prompts.note(
@@ -120,13 +148,7 @@ export class MusicDL {
           prompts.note(
             'spotDL reads Spotify metadata and usually matches audio from YouTube; it does not download Spotify’s original streams. Matches may differ from the release.',
           );
-        const selected = await selectTracks(
-          this.resolver,
-          resolved,
-          flags,
-          prompts,
-          this.operations.signal,
-        );
+        const selected = await selectTracks(this.resolver, resolved, flags, prompts, signal);
         tracks.push(...selected.tracks);
         collectionName ??= selected.collection?.title;
       }
@@ -136,7 +158,7 @@ export class MusicDL {
           'Search selection requires a terminal. Use musicdl search to list results.',
           'INTERACTIVE_REQUIRED',
         );
-      const results = await this.resolver.search(parsed.query, this.operations.signal);
+      const results = await this.resolver.search(parsed.query, signal);
       const keys = new Set(
         await prompts.multiselect(
           'Search results · select tracks to download',
@@ -177,6 +199,7 @@ export class MusicDL {
       flags.localPlaylist ?? (this.config.createPlaylist && !!collectionName ? true : undefined);
     if (playlist === undefined && collectionName && prompts.interactive)
       playlist = await prompts.confirm('Create a local M3U8 playlist after downloading?', false);
+    signal.throwIfAborted();
     const result = await this.manager.enqueue(unique, flags.format ?? this.config.format);
     if (playlist) {
       const name =

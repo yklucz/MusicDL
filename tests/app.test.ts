@@ -36,6 +36,30 @@ describe('universal input workflow', () => {
   });
 });
 describe('safe subprocess boundary', () => {
+  it('times out a silent child and includes sanitized provider activity', async () => {
+    await expect(
+      new ProcessRunner().run(
+        process.execPath,
+        [
+          '-e',
+          "process.stderr.write('Waiting for provider token=private-token');setInterval(()=>{},1000)",
+        ],
+        { timeoutMs: 1500 },
+      ),
+    ).rejects.toMatchObject({
+      code: 'TIMEOUT',
+      message: expect.stringContaining('Waiting for provider'),
+    });
+    try {
+      await new ProcessRunner().run(
+        process.execPath,
+        ['-e', "process.stderr.write('token=private-token');setInterval(()=>{},1000)"],
+        { timeoutMs: 100 },
+      );
+    } catch (error) {
+      expect((error as Error).message).not.toContain('private-token');
+    }
+  });
   it('keeps public YouTube identity parameters while removing token parameters', () => {
     expect(redact('https://www.youtube.com/watch?v=abcdefghijk&list=PL123&token=secret')).toBe(
       'https://www.youtube.com/watch?v=abcdefghijk&list=PL123',

@@ -165,8 +165,10 @@ export function createProgram(): Command {
     .description('Inspect provider metadata without downloading')
     .argument('<url>')
     .action(async (url: string) =>
-      withApp(async (app) => {
-        json(await app.resolver.resolve(url, app.operations.signal));
+      withApp(async (app, prompt) => {
+        json(
+          await app.resolver.resolve(url, app.operations.signal, (value) => prompt.progress(value)),
+        );
       }),
     );
   program

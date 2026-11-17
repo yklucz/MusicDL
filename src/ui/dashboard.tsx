@@ -8,6 +8,8 @@ import { cleanText } from '../core/safety.js';
 import { PromptBroker } from './prompt-broker.js';
 import type { PromptRequest } from './prompt-broker.js';
 import { doctor } from '../doctor.js';
+import { metadataStatus } from '../providers/spotify.js';
+import type { MetadataProgress } from '../providers/spotify.js';
 
 const tabs = ['Home', 'Active', 'Queue', 'Library', 'Playlists', 'History', 'Settings'] as const;
 type Tab = (typeof tabs)[number];
@@ -49,6 +51,7 @@ export function Dashboard({
   const [modal, setModal] = useState<PromptRequest>(),
     [filter, setFilter] = useState(''),
     [filtering, setFiltering] = useState(false);
+  const [metadata, setMetadata] = useState<MetadataProgress>();
   const broker = useMemo(() => new PromptBroker(), []),
     closing = useRef(false),
     workRef = useRef<Promise<void> | undefined>(undefined);
@@ -75,25 +78,37 @@ export function Dashboard({
               : [];
   const selected = Math.min(cursor, Math.max(0, list.length - 1)),
     start = Math.max(0, selected - rows + 1);
-  const work = useCallback((task: () => Promise<void>): void => {
-    if (closing.current) return;
-    setBusy(true);
-    const promise = task()
-      .catch((error) => {
-        if (!closing.current && !isAbort(error)) setMessage(errorMessage(error));
-      })
-      .finally(() => {
-        if (!closing.current) setBusy(false);
-      });
-    workRef.current = promise;
-  }, []);
+  const work = useCallback(
+    (task: () => Promise<void>, kind: 'metadata' | 'action' = 'action'): void => {
+      if (closing.current) return;
+      setBusy(true);
+      const promise = task()
+        .catch((error) => {
+          if (!closing.current)
+            setMessage(
+              isAbort(error)
+                ? kind === 'metadata'
+                  ? 'Metadata loading cancelled.'
+                  : 'Operation cancelled.'
+                : errorMessage(error),
+            );
+        })
+        .finally(() => {
+          if (!closing.current) setBusy(false);
+        });
+      workRef.current = promise;
+    },
+    [],
+  );
   useEffect(() => {
     const update = (): void => redraw((value) => value + 1),
       request = (value?: PromptRequest): void => setModal(value),
       note = (value: string): void => setMessage(value);
+    const progress = (value: MetadataProgress | undefined): void => setMetadata(value);
     app.manager.on('change', update);
     broker.on('request', request);
     broker.on('note', note);
+    broker.on('progress', progress);
     const timer = setInterval(update, 500);
     void app.manager.start().catch((error) => setMessage(errorMessage(error)));
     return () => {
@@ -101,6 +116,7 @@ export function Dashboard({
       app.manager.off('change', update);
       broker.off('request', request);
       broker.off('note', note);
+      broker.off('progress', progress);
       broker.cancel();
     };
   }, [app, broker]);
@@ -120,7 +136,7 @@ export function Dashboard({
     setInput('');
     work(async () => {
       await app.downloadInput(value, {}, broker);
-    });
+    }, 'metadata');
   };
   const playlistAction = async (): Promise<void> => {
     const choice = await broker.select('Playlists', [
@@ -226,6 +242,11 @@ export function Dashboard({
       return;
     }
     if (key.escape) {
+      if (metadata) {
+        app.cancelInput();
+        setMessage('Cancelling metadata retrieval…');
+        return;
+      }
       setTab('Home');
       setFiltering(false);
       return;
@@ -473,6 +494,12 @@ export function Dashboard({
         )}
       </Box>
       <Box marginTop={1} width={width} flexDirection="column">
+        {metadata && (
+          <Text color={colors.accent}>
+            {['◐', '◓', '◑', '◒'][Math.floor(metadata.elapsedMs / 500) % 4]}{' '}
+            {metadataStatus(metadata)}
+          </Text>
+        )}
         <Text color={busy ? colors.accent : colors.muted}>
           {busy ? '◌ ' : ''}
           {message.split('\n').slice(0, 6).map(safe).join('\n')}
@@ -491,7 +518,7 @@ export function Dashboard({
                   : tab === 'Playlists'
                     ? 'Enter manage · n new/import'
                     : '↑ ↓ browse'}{' '}
-          · Tab navigate · Esc home · Ctrl+C quit
+          · Tab navigate · {metadata ? 'Esc cancel metadata' : 'Esc home'} · Ctrl+C quit
         </Text>
       </Box>
       <Text dimColor>

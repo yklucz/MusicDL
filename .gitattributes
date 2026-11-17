@@ -1,0 +1,2 @@
+# Keep source, scripts, documentation and lockfiles identical on every runner.
+* text=auto eol=lf

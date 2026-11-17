@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Choice, PromptPort } from '../prompts.js';
 import { abortError } from '../core/errors.js';
+import type { MetadataProgress } from '../providers/spotify.js';
 export interface PromptRequest {
   kind: 'select' | 'multiselect' | 'confirm' | 'text';
   message: string;
@@ -59,6 +60,9 @@ export class PromptBroker extends EventEmitter implements PromptPort {
   }
   note(message: string): void {
     this.emit('note', message);
+  }
+  progress(value: MetadataProgress | undefined): void {
+    this.emit('progress', value);
   }
   cancel(): void {
     this.current?.reject(abortError());

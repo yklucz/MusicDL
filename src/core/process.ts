@@ -117,7 +117,25 @@ export class ProcessRunner implements Runner {
       });
       child.on('close', (code) => {
         cleanup();
+        if (options.onLine) {
+          try {
+            for (const line of Object.values(partial)) if (line) options.onLine(line);
+          } catch (error) {
+            reason ??= error instanceof Error ? error : new Error(String(error));
+          }
+        }
         if (reason) {
+          if (
+            reason instanceof MusicDLError &&
+            reason.code === 'TIMEOUT' &&
+            (stderr || stdout).trim()
+          ) {
+            reason = new MusicDLError(
+              `${reason.message} Recent tool output: ${redact(stderr || stdout).slice(-800)}`,
+              reason.code,
+              reason.retryable,
+            );
+          }
           reject(reason);
           return;
         }

@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { useApp } from 'ink';
 import { render, cleanup } from 'ink-testing-library';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Dashboard } from '../src/ui/dashboard.js';
@@ -71,6 +71,45 @@ async function fixture(runner?: Runner): Promise<MusicDL> {
   return app;
 }
 describe('keyboard terminal interface', () => {
+  it('keeps metadata loading active and navigable, then cancels without starting downloads', async () => {
+    const runner: Runner = {
+      run: async (_command, _args, options) => {
+        options?.signal?.throwIfAborted();
+        return new Promise((_, reject) =>
+          options?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+            once: true,
+          }),
+        );
+      },
+    };
+    const app = await fixture(runner);
+    // A disposable SDK installation makes the test independent of installed
+    // provider tools while still exercising the real playlist resolver path.
+    const spotdl = path.join(
+      path.dirname(app.paths.database),
+      process.platform === 'win32' ? 'spotdl.exe' : 'spotdl',
+    );
+    const python = path.join(
+      path.dirname(spotdl),
+      process.platform === 'win32' ? 'python.exe' : 'python',
+    );
+    await writeFile(spotdl, '');
+    await writeFile(python, '');
+    app.config.tools.spotdl = spotdl;
+    const ui = await terminal(<Dashboard app={app} />);
+    await ui.press('https://open.spotify.com/playlist/abcdefghijklmnopqrstuv');
+    await ui.press('\r');
+    await ui.frame('Spotify playlist');
+    await ui.frame('s elapsed');
+    expect(ui.lastFrame()).toMatch(/\d+s elapsed/);
+    expect(app.store.jobs()).toHaveLength(0);
+    await ui.press('\t');
+    await ui.frame('Nothing here yet.');
+    await ui.press('\x1b');
+    await ui.frame('Metadata loading cancelled.');
+    expect(app.operations.signal.aborted).toBe(false);
+    expect(app.store.jobs()).toHaveLength(0);
+  });
   it('preserves playlist membership and order when the track editor is confirmed unchanged', async () => {
     const app = await fixture();
     for (const id of ['a', 'b'])

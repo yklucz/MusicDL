@@ -1,4 +1,4 @@
-import type { Track, Provider, Collection } from '../core/types.js';
+import type { Track, Provider, Collection, ResolvedInput } from '../core/types.js';
 import { MusicDLError } from '../core/errors.js';
 import { cleanText } from '../core/safety.js';
 export type Data = Record<string, unknown>;
@@ -151,5 +151,174 @@ export function spotifyTrack(value: unknown): Track {
     isrc: str(d.isrc),
     collectionPosition: num(d.list_position),
     confidence: 'provider',
+  };
+}
+export function spotifyMetadata(
+  value: unknown,
+  kind: 'track' | 'album' | 'playlist',
+  url: string,
+  reportedCount?: number,
+): ResolvedInput {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new MusicDLError(
+      'Spotify returned no accessible tracks. The item may be empty, private or unavailable.',
+      'UNAVAILABLE',
+    );
+  const incomplete = (detail: string): never => {
+    throw new MusicDLError(
+      `Incomplete metadata: ${detail}. Retry; no audio was queued.`,
+      'INCOMPLETE_METADATA',
+    );
+  };
+  if (kind === 'track') {
+    if (value.length !== 1) incomplete('a track URL returned more than one track');
+    return { kind: 'track', track: spotifyTrack(value[0]) };
+  }
+  const lengths = value.map((item) => num(object(item).list_length));
+  const expected = reportedCount ?? lengths[0];
+  if (expected === undefined || !Number.isSafeInteger(expected) || expected < 1)
+    incomplete('spotDL did not report a verifiable collection size');
+  if (value.length !== expected || lengths.some((length) => length !== expected))
+    incomplete(`spotDL returned ${value.length} entries for ${expected} reported tracks`);
+  const tracks: Track[] = [];
+  for (const [index, item] of value.entries()) {
+    try {
+      tracks.push(spotifyTrack(item));
+    } catch {
+      incomplete(`entry ${index + 1} is missing valid song metadata`);
+    }
+  }
+  if (kind === 'playlist') {
+    const positions = new Set(tracks.map((track) => track.collectionPosition));
+    if (
+      positions.size !== expected ||
+      tracks.some(
+        (track) =>
+          !Number.isSafeInteger(track.collectionPosition) ||
+          track.collectionPosition! < 1 ||
+          track.collectionPosition! > expected!,
+      )
+    )
+      incomplete('playlist positions are missing, duplicated or out of range');
+    tracks.sort((a, b) => a.collectionPosition! - b.collectionPosition!);
+  } else
+    tracks.sort(
+      (a, b) =>
+        (a.discNumber ?? 1) - (b.discNumber ?? 1) ||
+        (a.trackNumber ?? a.collectionPosition ?? Number.MAX_SAFE_INTEGER) -
+          (b.trackNumber ?? b.collectionPosition ?? Number.MAX_SAFE_INTEGER),
+    );
+  const first = object(value[0]);
+  return {
+    kind: 'collection',
+    collection: {
+      id: url.split('/').at(-1)!,
+      url,
+      title:
+        str(first.list_name) ??
+        (kind === 'album' ? str(first.album_name) : undefined) ??
+        `Spotify ${kind}`,
+      creator: kind === 'album' ? str(first.album_artist) : str(first.list_owner),
+      kind,
+      tracks,
+      totalCount: expected!,
+      unavailableCount: 0,
+    },
+  };
+}
+export function spotifyPlaylistBatch(value: unknown, url: string): Collection {
+  const batch = object(value);
+  const total = num(batch.total);
+  const incomplete = (): never => {
+    throw new MusicDLError(
+      'Incomplete metadata: playlist pages or available track details are missing. Retry; no audio was queued.',
+      'INCOMPLETE_METADATA',
+    );
+  };
+  if (
+    batch.schema !== 'musicdl-spotify-playlist-v1' ||
+    batch.complete !== true ||
+    total === undefined ||
+    !Number.isSafeInteger(total) ||
+    total < 0 ||
+    !Array.isArray(batch.entries) ||
+    batch.entries.length !== total
+  )
+    incomplete();
+  const entries = batch.entries as unknown[];
+  const tracks: Track[] = [];
+  let unavailableCount = 0;
+  for (const [index, entry] of entries.entries()) {
+    const raw = object(object(object(entry).itemV2).data);
+    if (
+      ['NotFound', 'RestrictedContent', 'Episode', 'LocalTrack'].includes(String(raw.__typename)) ||
+      object(raw.playability).playable === false
+    ) {
+      unavailableCount++;
+      continue;
+    }
+    const id = str(raw.uri)?.match(/^spotify:track:([a-zA-Z0-9]{22})$/)?.[1];
+    const album = object(raw.albumOfTrack);
+    const artists = object(raw.artists).items;
+    const names = Array.isArray(artists)
+      ? artists
+          .map((artist) => str(object(object(artist).profile).name) ?? str(object(artist).name))
+          .filter((name): name is string => !!name)
+      : [];
+    const title = str(raw.name),
+      duration = num(object(raw.trackDuration).totalMilliseconds);
+    if (
+      !id ||
+      !title ||
+      !names.length ||
+      !Array.isArray(artists) ||
+      names.length !== artists.length ||
+      !str(album.name) ||
+      !duration ||
+      duration <= 0
+    )
+      incomplete();
+    const covers = object(album.coverArt).sources;
+    const cover = Array.isArray(covers)
+      ? covers
+          .map(object)
+          .filter((image) => str(image.url))
+          .sort(
+            (a, b) =>
+              (num(b.width) ?? 0) * (num(b.height) ?? 0) -
+              (num(a.width) ?? 0) * (num(a.height) ?? 0),
+          )[0]
+      : undefined;
+    const albumArtists = object(album.artists).items;
+    const albumArtist = Array.isArray(albumArtists)
+      ? str(object(object(albumArtists[0]).profile).name)
+      : undefined;
+    tracks.push({
+      key: `spotify:${id!}`,
+      id: id!,
+      provider: 'spotify',
+      url: `https://open.spotify.com/track/${id!}`,
+      title: title!,
+      artist: names.join(', '),
+      album: str(album.name),
+      albumArtist,
+      artworkUrl: str(cover?.url),
+      releaseDate: str(object(album.date).isoString)?.split('T')[0],
+      duration: duration! / 1000,
+      trackNumber: num(raw.trackNumber),
+      discNumber: num(raw.discNumber),
+      collectionPosition: index + 1,
+      confidence: 'provider',
+    });
+  }
+  return {
+    id: url.split('/').at(-1)!,
+    url,
+    title: str(batch.name) ?? 'Spotify playlist',
+    creator: str(batch.creator),
+    kind: 'playlist',
+    tracks,
+    totalCount: total!,
+    unavailableCount,
   };
 }

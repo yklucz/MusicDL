@@ -10,26 +10,26 @@ import type {
 import type { PromptPort } from './prompts.js';
 import { MusicDLError } from './core/errors.js';
 import { validateUrl } from './core/safety.js';
-import {
-  object,
-  parseJson,
-  spotifyTrack,
-  str,
-  ytCollection,
-  ytTrack,
-} from './providers/metadata.js';
+import { object, parseJson, ytCollection, ytTrack } from './providers/metadata.js';
 import { ytMetadataArgs, ytBaseArgs } from './providers/ytdlp.js';
+import { loadSpotifyMetadata } from './providers/spotify.js';
+import type { MetadataReporter, SpotifyKind } from './providers/spotify.js';
 
 export class Resolver {
   constructor(
     private readonly runner: Runner,
     private readonly tools: Tools,
     private readonly allowLocal = false,
+    private readonly metadataTimeoutMs = 240_000,
   ) {}
-  async resolve(input: string, signal?: AbortSignal): Promise<ResolvedInput> {
+  async resolve(
+    input: string,
+    signal?: AbortSignal,
+    report?: MetadataReporter,
+  ): Promise<ResolvedInput> {
     const url = validateUrl(input.trim(), this.allowLocal);
     const host = url.hostname.toLowerCase();
-    if (host === 'open.spotify.com') return this.spotify(url, signal);
+    if (host === 'open.spotify.com') return this.spotify(url, signal, report);
     if (host === 'spotify.link' || host === 'spoti.fi')
       throw new MusicDLError(
         'Paste the full open.spotify.com track, album or playlist URL.',
@@ -91,62 +91,26 @@ export class Resolver {
       )
       .filter((t) => t.title);
   }
-  private async spotify(url: URL, signal?: AbortSignal): Promise<ResolvedInput> {
+  private async spotify(
+    url: URL,
+    signal?: AbortSignal,
+    report?: MetadataReporter,
+  ): Promise<ResolvedInput> {
     const match = url.pathname.match(
       /^\/(?:intl-[a-z]+\/)?(track|album|playlist)\/([a-zA-Z0-9]{22})\/?$/,
     );
     if (!match)
       throw new MusicDLError('Use a Spotify track, album or playlist URL.', 'UNSUPPORTED');
-    const kind = match[1]!,
-      id = match[2]!;
-    const canonical = `https://open.spotify.com/${kind}/${id}`;
-    const result = await this.runner.run(
-      this.tools.spotdl,
-      ['save', canonical, '--save-file', '-', '--log-level', 'ERROR'],
-      { signal, timeoutMs: 240_000 },
+    const kind = match[1] as SpotifyKind;
+    return loadSpotifyMetadata(
+      this.runner,
+      this.tools,
+      `https://open.spotify.com/${kind}/${match[2]}`,
+      kind,
+      signal,
+      report,
+      this.metadataTimeoutMs,
     );
-    const data = parseJson(result.stdout);
-    if (!Array.isArray(data) || !data.length)
-      throw new MusicDLError(
-        'Spotify returned no accessible tracks. The item may be private or unavailable.',
-        'UNAVAILABLE',
-      );
-    const tracks: Track[] = [];
-    let unavailableCount = 0;
-    for (const item of data) {
-      try {
-        tracks.push(spotifyTrack(item));
-      } catch {
-        unavailableCount++;
-      }
-    }
-    if (kind === 'track') {
-      if (!tracks[0]) throw new MusicDLError('Spotify track is unavailable.', 'UNAVAILABLE');
-      return { kind: 'track', track: tracks[0] };
-    }
-    if (kind === 'album')
-      tracks.sort(
-        (a, b) =>
-          (a.discNumber ?? 1) - (b.discNumber ?? 1) ||
-          (a.trackNumber ?? a.collectionPosition ?? Number.MAX_SAFE_INTEGER) -
-            (b.trackNumber ?? b.collectionPosition ?? Number.MAX_SAFE_INTEGER),
-      );
-    else if (tracks.every((track) => track.collectionPosition !== undefined))
-      tracks.sort((a, b) => a.collectionPosition! - b.collectionPosition!);
-    const first = object(data[0]);
-    return {
-      kind: 'collection',
-      collection: {
-        id,
-        url: canonical,
-        title: str(first.list_name) ?? str(first.album_name) ?? `Spotify ${kind}`,
-        creator: kind === 'album' ? str(first.album_artist) : str(first.list_owner),
-        kind: kind === 'album' ? 'album' : 'playlist',
-        tracks,
-        totalCount: data.length,
-        unavailableCount,
-      },
-    };
   }
 }
 export async function selectTracks(

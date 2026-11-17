@@ -6,7 +6,7 @@ MusicDL uses official yt-dlp and spotDL subprocesses, FFmpeg/ffprobe, an async p
 
 ## Install
 
-Requires **Node.js 24.12+**, **pnpm 12**, **FFmpeg/ffprobe**, **yt-dlp**, and **spotDL**. Python is used only by the official downloader tools. No Python application backend or native SQLite addon is required.
+Requires **Node.js 24.12+**, **pnpm 12**, **FFmpeg/ffprobe**, **yt-dlp**, and **spotDL**. Python runs the official downloader tools and a small bridge to spotDL's installed playlist SDK. No Python application backend or native SQLite addon is required.
 
 ```sh
 cd ~/Documents/MusicDL
@@ -52,6 +52,10 @@ On Linux, install Node/pnpm, FFmpeg and uv using their official instructions or 
 
 Paste several URLs separated by spaces or newlines. Mixed pasted prose and URLs is rejected. Queued items are always individual tracks, and every yt-dlp download explicitly uses `--no-playlist` with isolated configuration. Unavailable entries are excluded and counted. Collections too large for the bounded metadata output produce a clear error rather than silently selecting a partial set.
 
+Spotify metadata loading shows elapsed time and an animated activity indicator even while the provider is silent. Playlist page counts appear as pages arrive; Tab navigation remains available and **Esc cancels metadata retrieval**. The metadata operation times out after four minutes and reports sanitized recent provider activity. No audio is queued until collection selection and any batch confirmation finish.
+
+With the pinned **spotDL 4.6.0** environment installed by `pnpm setup:tools`, playlist metadata comes from the same public SDK used by spotDL, in pages of up to 343 entries. This avoids the save command's per-track enrichment, lyric searches and unrelated YouTube Music probe. MusicDL checks page offsets, totals, revisions when provided, and every available track before showing the selection. Original positions and release artwork are retained; explicitly unavailable entries are counted. Truncated or malformed metadata fails instead of being presented as a complete collection. A standalone spotDL installation without its companion Python environment produces setup instructions for playlists, because `save` alone cannot prove pagination completed. Tracks and albums continue to use `spotdl save`, with lyric searches and the unrelated connectivity probe disabled. Missing optional metadata is left unset, and corrections remain available through `--edit-metadata`.
+
 Direct CLI examples (quote URLs containing `&`):
 
 ```sh
@@ -70,15 +74,15 @@ musicdl search 'artist song title' --download
 
 ## Terminal controls
 
-| View              | Keys                                                                            |
-| ----------------- | ------------------------------------------------------------------------------- |
-| Home              | Paste/type, Enter to resolve or search                                          |
-| All views         | Tab / Shift+Tab to navigate; Esc for Home; Ctrl+C to quit                       |
-| Active / Queue    | Up/Down to select; `c` cancel; Queue `r` retries failed/cancelled jobs          |
-| Library           | `/` filter, Enter inspect/correct/add to playlist, `i` import                   |
-| Playlists         | `n` create/import, Enter manage selected playlist                               |
-| Settings          | Enter edit, `d` run doctor                                                      |
-| Selection prompts | Up/Down, Space toggles checkboxes, `a` toggles all, Enter confirms, Esc cancels |
+| View              | Keys                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| Home              | Paste/type, Enter to resolve or search                                                  |
+| All views         | Tab / Shift+Tab to navigate; Esc for Home (cancel while metadata loads); Ctrl+C to quit |
+| Active / Queue    | Up/Down to select; `c` cancel; Queue `r` retries failed/cancelled jobs                  |
+| Library           | `/` filter, Enter inspect/correct/add to playlist, `i` import                           |
+| Playlists         | `n` create/import, Enter manage selected playlist                                       |
+| Settings          | Enter edit, `d` run doctor                                                              |
+| Selection prompts | Up/Down, Space toggles checkboxes, `a` toggles all, Enter confirms, Esc cancels         |
 
 Downloads remain asynchronous while navigating. yt-dlp progress includes percentage, speed and ETA when the provider supplies them. spotDL exposes less stable progress through its CLI: matching/downloading status is always displayed, percentages when present; unavailable speed/ETA are not estimated. Exiting stops child processes and leaves unfinished jobs recoverable. Relaunching `musicdl` resumes them. The application must remain open to run downloads; `queue-only` does not start a background daemon.
 
@@ -187,7 +191,7 @@ pnpm format:check
 pnpm dev
 ```
 
-The integration test needs yt-dlp, FFmpeg and ffprobe plus permission to bind localhost. It skips when media tools are absent; it never substitutes mock audio for an end-to-end pass. Unit/CLI/UI tests run without provider access. [Validation notes](docs/validation.md) distinguish actual results, public metadata probes, and unverified platform/device behavior. The CI matrix covers macOS, Linux and Windows; a configured workflow is not evidence that those remote runs have passed.
+The integration test needs yt-dlp, FFmpeg and ffprobe plus permission to bind localhost. It skips when media tools are absent; it never substitutes mock audio for an end-to-end pass. Unit/CLI/UI tests run without provider access; paging tests exercise the Python bridge with deterministic page fixtures. [Validation notes](docs/validation.md) distinguish actual results, public metadata probes, and unverified platform/device behavior. CI uses native `macos-latest` with Homebrew FFmpeg, plus Ubuntu and Windows. Every runner verifies both `ffmpeg` and `ffprobe`. Git attributes enforce LF source checkouts so formatting checks agree across platforms.
 
 The engine lives in `src/resolver.ts`, `src/providers`, `src/downloads`, `src/audio` and `src/storage`; library, playlists, settings and device adapters are separate modules. `src/cli.ts` and `src/ui` consume the same engine. There is no player-specific logic in the download queue.
 
