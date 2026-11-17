@@ -14,8 +14,13 @@ const temporary = await mkdtemp(path.join(tmpdir(), 'musicdl-install-ci-'));
 const root = path.join(temporary, 'cài đặt 二', 'MusicDL');
 const home = path.join(temporary, 'profile');
 const binDir = path.join(home, 'bin');
-function child(command, args, env = process.env) {
-  const result = spawnSync(command, args, { env, encoding: 'utf8', shell: false });
+function child(command, args, env = process.env, windowsVerbatimArguments = false) {
+  const result = spawnSync(command, args, {
+    env,
+    encoding: 'utf8',
+    shell: false,
+    windowsVerbatimArguments,
+  });
   if (result.status !== 0)
     throw new Error(
       `${command} failed (${result.status}): ${result.stderr || result.error?.message || result.stdout}`,
@@ -44,6 +49,7 @@ try {
     'install.sh',
     'install.ps1',
     'README.md',
+    'LICENSE',
   ])
     await cp(path.join(source, name), path.join(root, name), { recursive: true });
   const options = {
@@ -59,7 +65,7 @@ try {
   const env = { ...process.env, MUSICDL_HOME: path.join(temporary, 'doctor-state') };
   function launch(args) {
     return process.platform === 'win32'
-      ? child('cmd.exe', ['/d', '/s', '/c', `""${first.command}" ${args.join(' ')}"`], env)
+      ? child('cmd.exe', ['/d', '/s', '/c', `""${first.command}" ${args.join(' ')}"`], env, true)
       : child(first.command, args, env);
   }
   assert.match(launch(['--version']), /^1\.0\.0\s*$/);

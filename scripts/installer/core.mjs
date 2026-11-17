@@ -74,7 +74,7 @@ async function confirm(message) {
 async function download(url) {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(120_000),
-    headers: { 'User-Agent': 'MusicDL-installer', Accept: 'application/vnd.github+json' },
+    headers: { 'User-Agent': 'MusicDL-installer' },
   });
   if (!response.ok) throw new Error(`Download failed: ${response.status} ${url}`);
   return Buffer.from(await response.arrayBuffer());
@@ -373,7 +373,7 @@ export async function ensurePnpm(o) {
   return { command, prefix: [] };
 }
 
-async function ensureUv(o) {
+export async function ensureUv(o) {
   if (
     !(o.platform === 'win32' && o.arch === 'arm64') &&
     (await execute(o, 'uv', ['--version'])).status === 0
@@ -394,19 +394,15 @@ async function ensureUv(o) {
         ? `${cpu}-pc-windows-msvc`
         : `${cpu}-unknown-linux-gnu`;
   const archiveName = `uv-${target}.${o.platform === 'win32' ? 'zip' : 'tar.gz'}`;
-  const release = JSON.parse(
-    (
-      await o.download(`https://api.github.com/repos/astral-sh/uv/releases/tags/${version}`)
-    ).toString(),
-  );
-  const asset = release.assets?.find((item) => item.name === archiveName);
-  const sha = asset?.digest?.match(/^sha256:([a-f0-9]{64})$/)?.[1];
-  if (!sha || !asset.browser_download_url.startsWith('https://github.com/astral-sh/uv/releases/'))
+  const archiveUrl = `https://github.com/astral-sh/uv/releases/download/${version}/${archiveName}`;
+  const checksum = (await o.download(`${archiveUrl}.sha256`)).toString('utf8').trim();
+  const entry = /^([a-f0-9]{64})[ \t]+(\S+)$/i.exec(checksum);
+  if (!entry || entry[2] !== archiveName)
     throw new Error(
-      `No verified uv binary available for ${target}; install uv from https://docs.astral.sh/uv/getting-started/installation/ and retry.`,
+      `Invalid uv checksum metadata for ${archiveName}; expected one SHA256 entry naming that archive.`,
     );
   const archive = path.join(directory, archiveName);
-  await verifiedDownload(asset.browser_download_url, archive, 'sha256', sha, o.download);
+  await verifiedDownload(archiveUrl, archive, 'sha256', entry[1], o.download);
   if (o.platform === 'win32')
     await powershell(
       o,

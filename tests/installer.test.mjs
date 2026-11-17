@@ -110,6 +110,7 @@ test('launcher pins selected Node and tool PATH, handles Unicode and spaces, and
       process.platform === 'win32'
         ? spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `""${command}" "a b" Việt"`], {
             encoding: 'utf8',
+            windowsVerbatimArguments: true,
             env: process.env,
           })
         : spawnSync(command, ['a b', 'Việt'], { encoding: 'utf8', env: { PATH: '/usr/bin' } });
@@ -628,21 +629,12 @@ exit 8
         });
         return { status: result.status, stdout: result.stdout, stderr: result.stderr };
       };
-      options.download = async (url) =>
-        url.includes('/releases/tags/')
-          ? Buffer.from(
-              JSON.stringify({
-                assets: [
-                  {
-                    name: `${target}.tar.gz`,
-                    digest: `sha256:${digest}`,
-                    browser_download_url:
-                      'https://github.com/astral-sh/uv/releases/download/0.13.8/uv-aarch64-apple-darwin.tar.gz',
-                  },
-                ],
-              }),
-            )
-          : bytes;
+      const archiveUrl = `https://github.com/astral-sh/uv/releases/download/0.13.8/${target}.tar.gz`;
+      options.download = async (url) => {
+        if (url === `${archiveUrl}.sha256`) return Buffer.from(`${digest}  ${target}.tar.gz\n`);
+        if (url === archiveUrl) return bytes;
+        throw new Error(`Unexpected download; GitHub API must not be required: ${url}`);
+      };
       const result = await setupTools(options);
       const child = spawnSync(path.join(result.environment, 'bin', 'yt-dlp'), ['--version'], {
         encoding: 'utf8',
@@ -727,6 +719,7 @@ test(
       );
       const child = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `""${caller}""`], {
         encoding: 'utf8',
+        windowsVerbatimArguments: true,
         env: { ...process.env, MUSICDL_TEST_COMMAND: command },
       });
       assert.equal(child.status, 0, child.stderr);
@@ -768,4 +761,44 @@ test('Windows package-manager PATH refresh preserves Unicode through an ASCII tr
       return original(cmd, args, invocation);
     };
     await install(options);
+  }));
+
+for (const [name, checksum] of [
+  ['a different archive name', `${'a'.repeat(64)}  uv-x86_64-pc-windows-msvc.zip\n`],
+  ['malformed digest', 'not-a-digest  uv-aarch64-apple-darwin.tar.gz\n'],
+  [
+    'ambiguous multiple entries',
+    `${'a'.repeat(64)}  uv-aarch64-apple-darwin.tar.gz\n${'b'.repeat(64)}  uv-aarch64-apple-darwin.tar.gz\n`,
+  ],
+]) {
+  test(`uv refuses checksum metadata with ${name} before acquiring a binary`, () =>
+    fixture(async (f) => {
+      const options = harness({ ...f });
+      options.exec = async () => ({ status: 1, stdout: '' });
+      options.download = async (url) => {
+        if (!url.endsWith('/uv-aarch64-apple-darwin.tar.gz.sha256'))
+          throw Error(`Unexpected network request: ${url}`);
+        return Buffer.from(checksum);
+      };
+      await assert.rejects(setupTools(options), /checksum.*metadata|metadata.*checksum/i);
+      await assert.rejects(access(path.join(f.root, '.tools', 'uv-0.13.8', 'uv')));
+    }));
+}
+
+test('uv rejects a mismatching static release checksum before extracting executable bytes', () =>
+  fixture(async (f) => {
+    const options = harness({ ...f });
+    options.exec = async () => ({ status: 1, stdout: '' });
+    options.download = async (url) => {
+      if (url.endsWith('.sha256'))
+        return Buffer.from(`${'a'.repeat(64)}  uv-aarch64-apple-darwin.tar.gz\n`);
+      if (
+        url ===
+        'https://github.com/astral-sh/uv/releases/download/0.13.8/uv-aarch64-apple-darwin.tar.gz'
+      )
+        return Buffer.from('tampered archive');
+      throw Error('GitHub API is unavailable and must not be requested');
+    };
+    await assert.rejects(setupTools(options), /checksum integrity/i);
+    await assert.rejects(access(path.join(f.root, '.tools', 'uv-0.13.8', 'uv')));
   }));

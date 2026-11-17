@@ -58,7 +58,7 @@ For existing development environments, `pnpm install --frozen-lockfile`, `pnpm b
 
 ### Updating and uninstalling
 
-Use a normal fast-forward update, then rerun the installer:
+Close MusicDL before updating so an older queue worker cannot run newer jobs. Unfinished jobs remain persistent. Use a normal fast-forward update, then rerun the installer:
 
 ```sh
 git pull --ff-only
