@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useEffect } from 'react';
+import type { ReactNode } from 'react';
+import { useApp } from 'ink';
 import { render, cleanup } from 'ink-testing-library';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,15 +17,40 @@ afterEach(async () => {
   cleanup();
   for (const app of apps.splice(0)) await app.close();
 });
-const tick = async (): Promise<void> => {
-  await new Promise((resolve) => setTimeout(resolve, 40));
-};
-async function until(check: () => boolean): Promise<void> {
-  for (let i = 0; i < 50; i++) {
-    if (check()) return;
-    await tick();
+// Ink commits frames and input subscriptions asynchronously. Wait for its actual
+// render barrier and the expected prompt instead of guessing a platform-dependent delay.
+async function terminal(children: ReactNode) {
+  let flush: (() => Promise<void>) | undefined;
+  function Barrier(): React.JSX.Element {
+    const app = useApp();
+    useEffect(() => {
+      flush = app.waitUntilRenderFlush;
+    }, [app.waitUntilRenderFlush]);
+    return <>{children}</>;
   }
-  expect(check()).toBe(true);
+  const ui = render(<Barrier />);
+  const write = ui.stdout.write;
+  ui.stdout.write = (frame: string, callback?: () => void): void => {
+    if (frame) write(frame);
+    callback?.();
+  };
+  await vi.waitFor(() => expect(flush).toBeDefined());
+  await flush!();
+  return {
+    ...ui,
+    async press(input: string) {
+      await flush!();
+      ui.stdin.write(input);
+      await flush!();
+    },
+    async frame(value: string) {
+      await vi.waitFor(() => expect(ui.lastFrame()).toContain(value), {
+        timeout: 5000,
+        interval: 10,
+      });
+      await flush!();
+    },
+  };
 }
 async function fixture(runner?: Runner): Promise<MusicDL> {
   const root = await mkdtemp(path.join(tmpdir(), 'musicdl-ui-'));
@@ -60,39 +88,34 @@ describe('keyboard terminal interface', () => {
       });
     const playlist = app.playlists.create('Ordered');
     app.playlists.add(playlist.id, ['b', 'a']);
-    const ui = render(<Dashboard app={app} initialTab="Playlists" />);
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
-    ui.stdin.write('\x1b[B');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
+    const ui = await terminal(<Dashboard app={app} initialTab="Playlists" />);
+    await ui.frame('Ordered · 2 tracks');
+    await ui.press('\r');
+    await ui.frame('Create playlist');
+    await ui.press('\x1b[B');
+    await ui.press('\r');
+    await ui.frame('Choose playlist tracks');
+    await ui.press('\r');
+    await ui.frame('2 selected');
+    await ui.press('\r');
+    await ui.frame('Ordered · 2 tracks');
     expect(app.store.playlistTracks(playlist.id).map((track) => track.id)).toEqual(['b', 'a']);
   });
   it('starts with one universal field and navigates to a searchable library with Tab', async () => {
     const app = await fixture(),
-      ui = render(<Dashboard app={app} />);
-    await until(() => ui.lastFrame()?.includes('Paste a URL or search for music...') ?? false);
+      ui = await terminal(<Dashboard app={app} />);
+    await ui.frame('Paste a URL or search for music...');
     expect(ui.lastFrame()).not.toContain('Download Song');
     for (let i = 0; i < 3; i++) {
-      ui.stdin.write('\t');
-      await tick();
+      await ui.press('\t');
     }
     expect(ui.lastFrame()).toContain('No indexed tracks');
-    ui.stdin.write('/');
-    await tick();
-    ui.stdin.write('Bài hát');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
+    await ui.press('/');
+    await ui.press('Bài hát');
+    await ui.press('\r');
     expect(ui.lastFrame()).toContain('Bài hát');
-    ui.stdin.write('\x1b');
-    await tick();
+    await ui.press('\x1b');
+    await ui.frame('Paste a URL or search for music...');
     expect(ui.lastFrame()).toContain('Paste a URL or search for music...');
   });
   it('asks the required mixed-link question with single-song as the default and supports cancellation', async () => {
@@ -108,31 +131,28 @@ describe('keyboard terminal interface', () => {
       }),
     };
     const app = await fixture(runner),
-      ui = render(<Dashboard app={app} />);
-    await tick();
-    ui.stdin.write('https://youtube.com/watch?v=abcdefghijk&list=PL123');
-    await tick();
-    ui.stdin.write('\r');
-    await until(() => ui.lastFrame()?.includes('Download this song only (default)') ?? false);
+      ui = await terminal(<Dashboard app={app} />);
+    await ui.press('https://youtube.com/watch?v=abcdefghijk&list=PL123');
+    await ui.press('\r');
+    await ui.frame('Download this song only (default)');
     expect(ui.lastFrame()).toContain('Download the entire playlist');
     expect(ui.lastFrame()).toContain('Select specific songs');
-    ui.stdin.write('\x1b');
-    await tick();
+    await ui.press('\x1b');
+    await ui.frame('Paste a URL or search for music...');
     expect(app.store.jobs()).toHaveLength(0);
   });
   it('creates a persistent playlist through keyboard prompts', async () => {
     const app = await fixture(),
-      ui = render(<Dashboard app={app} initialTab="Playlists" />);
-    await tick();
-    ui.stdin.write('n');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
-    ui.stdin.write('Favorites');
-    await tick();
-    ui.stdin.write('\r');
-    await tick();
-    expect(app.store.playlists().map((p) => p.name)).toEqual(['Favorites']);
+      ui = await terminal(<Dashboard app={app} initialTab="Playlists" />);
+    await ui.press('n');
+    await ui.frame('Create playlist');
+    await ui.press('\r');
+    await ui.frame('Playlist name');
+    await ui.press('Favorites');
+    await ui.frame('Favorites');
+    await ui.press('\r');
+    await vi.waitFor(() => expect(app.store.playlists().map((p) => p.name)).toEqual(['Favorites']));
+    await ui.frame('Created Favorites.');
     expect(ui.lastFrame()).toContain('Favorites');
   });
 });

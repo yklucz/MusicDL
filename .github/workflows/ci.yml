@@ -19,7 +19,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      - name: Install native FFmpeg on macOS
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew install ffmpeg
+      - name: Install FFmpeg on Ubuntu and Windows
+        if: runner.os != 'macOS'
+        uses: FedericoCarboni/setup-ffmpeg@v3
+      - name: Verify media tools and runner architecture
+        shell: bash
+        run: |
+          node -p "process.platform + '/' + process.arch"
+          ffmpeg -version
+          ffprobe -version
       - run: python -m pip install yt-dlp==2026.10.26
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
