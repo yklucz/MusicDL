@@ -6,33 +6,68 @@ MusicDL uses official yt-dlp and spotDL subprocesses, FFmpeg/ffprobe, an async p
 
 ## Install
 
-Requires **Node.js 24.12+**, **pnpm 12**, **FFmpeg/ffprobe**, **yt-dlp**, and **spotDL**. Python runs the official downloader tools and a small bridge to spotDL's installed playlist SDK. No Python application backend or native SQLite addon is required.
+Download or clone [this repository](https://github.com/yklucz/MusicDL), open its folder in a terminal, then run one installer command:
+
+macOS or Linux:
 
 ```sh
-cd ~/Documents/MusicDL
-pnpm install --frozen-lockfile
-pnpm build
-pnpm run setup
-musicdl doctor
+bash ./install.sh
+```
+
+Native Windows PowerShell:
+
+```powershell
+.\install.ps1
+```
+
+The installers detect OS and CPU, reuse compatible Node.js or verify and install official portable **Node.js 24.22.3** inside the project, install pinned **pnpm 12.21.0**, check **FFmpeg and ffprobe**, acquire **uv** and managed **Python 3.13**, and install **spotDL 4.6.0** and **yt-dlp 2026.10.26** in an isolated environment. They install locked project dependencies, build MusicDL, register the command, configure your user PATH and run doctor in a temporary profile. Python is used by the official tools and their small playlist SDK bridge. Existing application settings, downloads and library state are retained.
+
+After setup, open a new terminal and run:
+
+```sh
 musicdl
 ```
 
-`pnpm run setup` builds the project and installs a launcher in `~/.local/bin` on macOS/Linux. If necessary, add that directory to PATH. On this machine it is already on PATH. The launcher uses the installed project directory; keep that directory in place. `MUSICDL_BIN_DIR` can choose another launcher directory. Existing unrelated launchers are retained. Use the explicit `run`: pnpm also has an unrelated built-in `setup` command.
+The Windows wrapper also refreshes its current PowerShell session. The installed launcher pins the selected Node and exposes isolated downloader tools automatically. Keep the project folder in place: the command runs that checkout. Unrelated existing launchers are preserved with a clear error. `MUSICDL_BIN_DIR` selects a custom command directory; the default is `~/.local/bin` on macOS/Linux and a user-local MusicDL bin directory on Windows.
 
-macOS with Homebrew:
+System package commands are displayed and require confirmation. On macOS, missing FFmpeg is installed through Homebrew; if needed, the installer offers the official Homebrew bootstrap separately for approval. Windows x64 uses winget's FFmpeg package. Supported Linux package managers are offered with explicit consent. The installer never changes PowerShell execution policy or security settings. If your policy blocks a downloaded script, review it and follow your organization's policy; setup reports the limitation.
+
+Prerequisites and limits:
+
+- Internet access, a writable checkout and home directory, and a supported 64-bit OS. Bash bootstrap needs curl, tar, awk and a SHA256 verifier; native Windows needs PowerShell with archive expansion and HTTPS support.
+- Apple Silicon and Intel Node distributions are supported. FFmpeg availability depends on your macOS/Homebrew version; older Intel systems may need an existing compatible FFmpeg installation. See [Homebrew requirements](https://docs.brew.sh/Installation).
+- Linux bootstrap uses official glibc Node binaries; Alpine/musl needs a compatible system Node and dependencies. Unsupported CPUs or missing native tool packages fail with instructions.
+- Windows x64 is supported. Windows ARM64 uses native Node/uv and requires compatible native FFmpeg/ffprobe already on PATH because the automatic Gyan winget package is x64-only. Dependency wheel availability can still limit spotDL on a platform; such failures are reported without switching to emulation.
+- No administrator access is needed for project-local Node, pnpm, uv, Python or downloader tools. Homebrew, winget or Linux package changes may request privileges only after you approve their exact commands.
+
+Read-only dependency verification and a setup mode that refuses system changes:
 
 ```sh
-brew install node pnpm ffmpeg yt-dlp uv
-pnpm setup:tools
+bash ./install.sh --check
+bash ./install.sh --no-system
 ```
 
-`setup:tools` installs pinned official spotDL and yt-dlp in `.tools/spotdl` using uv and Python 3.13, without modifying system Python. Both project-local tools are discovered automatically when installed. To explicitly choose an executable:
+```powershell
+.\install.ps1 -Check
+.\install.ps1 -NoSystem
+```
+
+`--dry-run` / `-DryRun` performs the same read-only checks; missing prerequisites produce a failure, not an installation success. `--no-system` still permits isolated project downloads. If installation fails, read the reported command, correct the missing prerequisite and rerun: setup is idempotent. No partial attempt is reported as successful. `musicdl doctor` shows tool versions, CLI options and required audio encoders. Custom executable settings remain supported.
+
+For existing development environments, `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm run setup` and `pnpm setup:tools` remain available. Use the explicit `run setup`: pnpm has an unrelated built-in `setup` command.
+
+### Updating and uninstalling
+
+Use a normal fast-forward update, then rerun the installer:
 
 ```sh
-musicdl config set tools.ytdlp "$PWD/.tools/spotdl/bin/yt-dlp"
+git pull --ff-only
+bash ./install.sh
 ```
 
-On Linux, install Node/pnpm, FFmpeg and uv using their official instructions or your distribution's package manager, then use the same project commands. On Windows, install Node 24.12+, pnpm, FFmpeg and uv; run the commands in PowerShell. The launcher goes in `%LOCALAPPDATA%\MusicDL\bin`; add it to PATH. The isolated tool executables are in `.tools\spotdl\Scripts`. `musicdl doctor` verifies tool versions, required CLI options and audio encoders. Provider changes may require updating the official tools and configuring their executable paths.
+On Windows, use `.\install.ps1` after pulling. Local changes that prevent a fast-forward should be reviewed before updating. Rerunning retains settings and existing music; pinned tools and the application build are refreshed.
+
+To uninstall, close MusicDL, remove only its managed launcher from the installation summary, remove the `MusicDL PATH` block from your shell profile (or its bin entry from Windows User PATH), and optionally remove the checkout and its isolated `.tools` directory. Keep application data and `~/Music/MusicDL` if you want to retain downloads, playlists, queue and history. Shared system packages such as FFmpeg/Homebrew are not automatically removed.
 
 ## One input, safe selection
 
@@ -70,7 +105,7 @@ musicdl search 'artist song title'
 musicdl search 'artist song title' --download
 ```
 
-`--single` and `--playlist` are mutually exclusive explicit overrides. A mixed video-plus-playlist link in a noninteractive shell **always requires one of them**; `--yes` alone does not decide its scope. `--single` rejects collection-only URLs. Noninteractive collections require `--playlist` or `--yes`. Batches of **20 or more** selected tracks require confirmation; `--yes` explicitly approves that count. Existing indexed/queued tracks in the requested format are skipped. Existing filenames cause a visible failure and are never replaced.
+`--single` and `--playlist` are mutually exclusive explicit overrides. A mixed video-plus-playlist link in a noninteractive shell **always requires one of them**; `--yes` alone does not decide its scope. `--single` rejects collection-only URLs. Noninteractive collections require `--playlist` or `--yes`. Batches of **20 or more** selected tracks require confirmation; `--yes` explicitly approves that count. Collection requests skip duplicates already in that destination and copy compatible audio from other folders. Standalone requests retain global duplicate skipping. Existing filenames cause a visible failure and are never replaced.
 
 ## Terminal controls
 
@@ -95,6 +130,35 @@ musicdl history
 ```
 
 One queue worker owns a state directory at a time. Other CLI invocations can inspect or add to its queue and request cancellation. SQLite persists attempts and exponential retry delays. Original source files and intermediate output live in private per-job staging directories; successful jobs remove them. A content hash plus codec/duration journal recovers the interval between exclusive file publication and database completion. Completed audio is never removed by queue cancellation or cleanup.
+
+## Automatic playlist and album folders
+
+Collection folders are enabled by default. Spotify, YouTube and YouTube Music playlists and albums use their provider title, including when only a subset of songs is selected:
+
+```text
+Downloads/
+├── NEWWAVE/
+│   ├── Track A - Artist.mp3
+│   └── Track B - Artist.mp3
+├── Chill Music/
+│   └── Track C - Artist.opus
+└── Standalone Song - Artist.mp3
+```
+
+Choosing **this song only** for a video with playlist context keeps the standalone destination. Selecting one or several tracks through the playlist chooser keeps the collection folder. Collection folders take precedence over the Artist/Album structure; standalone downloads retain the configured structure and filename template.
+
+Folder names preserve Unicode and remove unsafe filename characters. Each provider collection has a stored identity and folder reservation. The first available title is used; unrelated same-name collections, case-equivalent names and existing unowned directories receive an identity suffix such as `Chill Music [a1b2c3d4]`. The same collection keeps its reserved folder if its online title later changes. Queued jobs retain their original folder across restarts and settings changes. Older queued jobs retain their original standalone behavior.
+
+Tracks requested in several collections appear in each requested folder. Compatible indexed audio is copied without re-encoding, preserving its embedded tags and artwork and leaving the original intact. Simultaneous requests for the same recording wait for the first download and reuse its completed audio. Existing destination music is never replaced; a conflicting filename produces an explicit error. Optional `--local-playlist` exports an M3U8 inside each collection folder using relative references to its copies; no playlist file is overwritten.
+
+For flat downloads, use Settings → Playlist folders, or:
+
+```sh
+musicdl config set playlistFolders false
+musicdl config set playlistFolders true   # Enable folders for future collection requests
+```
+
+Disabling collection folders restores global duplicate skipping and the existing `structure` behavior. It does not move existing files or change destinations already stored in the queue.
 
 ## Audio and metadata
 

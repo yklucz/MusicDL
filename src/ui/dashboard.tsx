@@ -299,6 +299,7 @@ export function Dashboard({
           { value: 'concurrency', label: 'Concurrency' },
           { value: 'downloadsDir', label: 'Download directory' },
           { value: 'filenameTemplate', label: 'Filename template' },
+          { value: 'playlistFolders', label: 'Playlist folders' },
         ]);
         if (option === 'format')
           await app.updateConfig({
@@ -326,6 +327,13 @@ export function Dashboard({
         else if (option === 'downloadsDir')
           await app.updateConfig({
             downloadsDir: await broker.text('Download directory', app.config.downloadsDir),
+          });
+        else if (option === 'playlistFolders')
+          await app.updateConfig({
+            playlistFolders: await broker.confirm(
+              'Use playlist and album folders?',
+              app.config.playlistFolders,
+            ),
           });
         else
           await app.updateConfig({
@@ -422,6 +430,7 @@ export function Dashboard({
                 <Text>Format {app.config.format}</Text>
                 <Text>Quality MP3 LAME VBR q2 · source-aware conversion</Text>
                 <Text>Downloads {safe(app.config.downloadsDir)}</Text>
+                <Text>Playlist folders {app.config.playlistFolders ? 'enabled' : 'disabled'}</Text>
                 <Text>Library {app.config.libraryDirs.map(safe).join(', ')}</Text>
                 <Text>Concurrency {app.config.concurrency}</Text>
                 <Text>Theme {app.config.theme}</Text>

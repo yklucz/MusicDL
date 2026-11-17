@@ -71,6 +71,19 @@ async function fixture(runner?: Runner): Promise<MusicDL> {
   return app;
 }
 describe('keyboard terminal interface', () => {
+  it('lets users turn collection folders off in settings', async () => {
+    const app = await fixture(),
+      ui = await terminal(<Dashboard app={app} initialTab="Settings" />);
+    await ui.press('\r');
+    await ui.frame('Playlist folders');
+    for (let index = 0; index < 5; index++) await ui.press('\x1b[B');
+    await ui.press('\r');
+    await ui.frame('Use playlist and album folders?');
+    await ui.press('\x1b[B');
+    await ui.press('\r');
+    await ui.frame('Settings saved.');
+    expect(app.config.playlistFolders).toBe(false);
+  });
   it('keeps metadata loading active and navigable, then cancels without starting downloads', async () => {
     const runner: Runner = {
       run: async (_command, _args, options) => {

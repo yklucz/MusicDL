@@ -36,6 +36,14 @@ export interface Collection {
   totalCount: number;
   unavailableCount: number;
 }
+export interface CollectionDestination {
+  key: string;
+  title: string;
+  kind: 'playlist' | 'album';
+  url: string;
+  root: string;
+  directory: string;
+}
 export type ResolvedInput =
   | { kind: 'track'; track: Track }
   | { kind: 'collection'; collection: Collection }
@@ -78,6 +86,7 @@ export interface Job {
   batchId?: string | undefined;
   progress?: Progress | undefined;
   audioInfo?: { duration: number; codec: string; bitrate: number } | undefined;
+  destination?: CollectionDestination | undefined;
 }
 export interface LibraryTrack {
   id: string;

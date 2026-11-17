@@ -21,6 +21,7 @@ export const settingsSchema = z
     largeBatchThreshold: z.number().int().min(2).max(10_000),
     theme: z.enum(['aurora', 'amber', 'mono']),
     createPlaylist: z.boolean(),
+    playlistFolders: z.boolean().default(true),
     allowLocalUrls: z.boolean(),
     tools: z.object({
       ytdlp: z.string().min(1),
@@ -88,6 +89,7 @@ export function defaults(home = homedir()): Settings {
     largeBatchThreshold: 20,
     theme: 'aurora',
     createPlaylist: false,
+    playlistFolders: true,
     allowLocalUrls: false,
     tools: {
       ytdlp: existsSync(localYtdlp) ? localYtdlp : 'yt-dlp',

@@ -1,8 +1,16 @@
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
-import type { AudioFormat, Job, LibraryTrack, Progress, Track } from '../core/types.js';
+import { mkdir, rm, stat, writeFile, copyFile, lstat, constants } from 'node:fs/promises';
+import type {
+  AudioFormat,
+  Job,
+  LibraryTrack,
+  Progress,
+  Track,
+  Collection,
+  CollectionDestination,
+} from '../core/types.js';
 import type { Settings } from '../settings.js';
 import type { ProcessedAudio } from '../audio/processor.js';
 import { filenameFor } from '../audio/processor.js';
@@ -13,6 +21,7 @@ import { Store } from '../storage/store.js';
 import { WorkerLock } from '../storage/lock.js';
 import { renderM3u } from '../playlists.js';
 import { matchesFormat } from '../audio/formats.js';
+import { collectionDirectory, reserveCollectionFolder } from './collections.js';
 
 export type DownloadPipeline = (
   job: Job,
@@ -21,6 +30,12 @@ export type DownloadPipeline = (
   update: (progress: Progress) => void,
 ) => Promise<ProcessedAudio>;
 const pending = new Set(['queued', 'retrying', 'downloading', 'processing']);
+function sameRecording(a: Track, b: Track): boolean {
+  return (
+    a.key === b.key ||
+    (!!a.isrc?.trim() && a.isrc.trim().toUpperCase() === b.isrc?.trim().toUpperCase())
+  );
+}
 export class DownloadManager extends EventEmitter {
   private readonly active = new Map<
     string,
@@ -44,18 +59,27 @@ export class DownloadManager extends EventEmitter {
     tracks: Track[],
     format: AudioFormat,
     batchId?: string,
-  ): Promise<{ added: Job[]; skipped: Track[] }> {
+    collection?: Collection,
+  ): Promise<{ added: Job[]; skipped: Track[]; destination?: CollectionDestination | undefined }> {
     const added: Job[] = [],
       skipped: Track[] = [];
+    const destination =
+      collection && this.config.playlistFolders && tracks.length
+        ? await reserveCollectionFolder(this.store, this.config.downloadsDir, collection)
+        : undefined;
     for (const track of tracks) {
       const duplicates = this.store.duplicatesFor(track);
       let downloaded = false;
       for (const duplicate of duplicates)
-        if (this.compatible(duplicate, format) && (await exists(duplicate.path))) {
+        if (
+          this.compatible(duplicate, format) &&
+          (await exists(duplicate.path)) &&
+          (!destination || path.dirname(duplicate.path) === destination.directory)
+        ) {
           downloaded = true;
           break;
         }
-      if (downloaded || this.store.activeDuplicate(track, format)) {
+      if (downloaded || this.store.activeDuplicate(track, format, destination)) {
         skipped.push(track);
         continue;
       }
@@ -70,6 +94,7 @@ export class DownloadManager extends EventEmitter {
         updatedAt: now,
         nextAttemptAt: 0,
         batchId,
+        destination,
       };
       try {
         this.store.addJob(job);
@@ -81,7 +106,7 @@ export class DownloadManager extends EventEmitter {
     }
     this.emit('change');
     this.tick();
-    return { added, skipped };
+    return { added, skipped, destination };
   }
   async start(): Promise<void> {
     if (this.running) return;
@@ -159,7 +184,13 @@ export class DownloadManager extends EventEmitter {
     for (const batch of this.store.downloadPlaylists().filter((b) => b.status === 'pending')) {
       if (
         batch.tracks.some((track) =>
-          jobs.some((job) => job.track.key === track.key && pending.has(job.status)),
+          jobs.some(
+            (job) =>
+              sameRecording(job.track, track) &&
+              job.format === batch.format &&
+              pending.has(job.status) &&
+              (!batch.destination || job.destination?.directory === batch.destination.directory),
+          ),
         )
       )
         continue;
@@ -167,7 +198,11 @@ export class DownloadManager extends EventEmitter {
         const tracks: LibraryTrack[] = [];
         for (const source of batch.tracks)
           for (const match of this.store.duplicatesFor(source))
-            if (this.compatible(match, batch.format) && (await exists(match.path))) {
+            if (
+              this.compatible(match, batch.format) &&
+              (await exists(match.path)) &&
+              (!batch.destination || path.dirname(match.path) === batch.destination.directory)
+            ) {
               tracks.push(match);
               break;
             }
@@ -175,7 +210,10 @@ export class DownloadManager extends EventEmitter {
           batch.playlistId,
           tracks.map((track) => track.id),
         );
-        await ensureSafeParent(this.config.downloadsDir, batch.outputPath);
+        await ensureSafeParent(
+          batch.destination?.root ?? this.config.downloadsDir,
+          batch.outputPath,
+        );
         await writeFile(batch.outputPath, renderM3u(tracks, path.dirname(batch.outputPath), true), {
           flag: 'wx',
           mode: 0o600,
@@ -214,7 +252,7 @@ export class DownloadManager extends EventEmitter {
     const job = this.store.job(id);
     if (!job || !['failed', 'cancelled'].includes(job.status))
       throw new MusicDLError('Only failed or cancelled jobs can be retried.', 'SELECTION');
-    if (this.store.activeDuplicate(job.track, job.format))
+    if (this.store.activeDuplicate(job.track, job.format, job.destination))
       throw new MusicDLError('This track is already queued.', 'DUPLICATE');
     this.store.updateJob(id, {
       status: 'queued',
@@ -242,6 +280,15 @@ export class DownloadManager extends EventEmitter {
         this.active.has(job.id)
       )
         continue;
+      // Wait for another destination's copy of this recording to finish, then
+      // reuse its indexed bytes instead of downloading it twice concurrently.
+      if (
+        [...this.active.keys()].some((id) => {
+          const other = jobs.find((candidate) => candidate.id === id);
+          return other?.format === job.format && sameRecording(other.track, job.track);
+        })
+      )
+        continue;
       const controller = new AbortController();
       this.store.updateJob(job.id, {
         status: 'downloading',
@@ -261,29 +308,32 @@ export class DownloadManager extends EventEmitter {
   }
   private async execute(job: Job, signal: AbortSignal): Promise<void> {
     const staging = path.join(this.stateDir, 'staging', job.id);
-    const outputRoot = this.config.downloadsDir,
+    const outputRoot = job.destination?.root ?? this.config.downloadsDir,
       structure = this.config.structure,
       template = this.config.filenameTemplate;
     try {
       await mkdir(staging, { recursive: true, mode: 0o700 });
-      const processed = await this.pipeline(job, staging, signal, (progress) => {
-        if (this.store.job(job.id)?.status === 'cancelled') {
-          this.active.get(job.id)?.controller.abort(abortError());
-          return;
-        }
-        this.store.updateJob(job.id, {
-          progress,
-          track: job.track,
-          ...(progress.stage === 'processing' ? { status: 'processing' as const } : {}),
-        });
-        this.emit('change');
-      });
+      const processed =
+        (await this.reuseAudio(job, staging, signal)) ??
+        (await this.pipeline(job, staging, signal, (progress) => {
+          if (this.store.job(job.id)?.status === 'cancelled') {
+            this.active.get(job.id)?.controller.abort(abortError());
+            return;
+          }
+          this.store.updateJob(job.id, {
+            progress,
+            track: job.track,
+            ...(progress.stage === 'processing' ? { status: 'processing' as const } : {}),
+          });
+          this.emit('change');
+        }));
       signal.throwIfAborted();
       if (this.store.job(job.id)?.status === 'cancelled')
         this.active.get(job.id)?.controller.abort(abortError());
       signal.throwIfAborted();
-      const directory =
-        structure === 'artist-album'
+      const directory = job.destination
+        ? collectionDirectory(job.destination)
+        : structure === 'artist-album'
           ? path.join(
               outputRoot,
               safeSegment(job.track.artist ?? 'Unknown Artist'),
@@ -364,6 +414,61 @@ export class DownloadManager extends EventEmitter {
       if (cancelled || status === 'failed') await this.cleanup(job.id).catch(() => {});
     }
     this.emit('change');
+  }
+  private async reuseAudio(
+    job: Job,
+    staging: string,
+    signal: AbortSignal,
+  ): Promise<ProcessedAudio | undefined> {
+    if (!job.destination) return undefined;
+    for (const duplicate of this.store.duplicatesFor(job.track)) {
+      if (!this.compatible(duplicate, job.format)) continue;
+      try {
+        const info = await lstat(duplicate.path);
+        if (
+          !info.isFile() ||
+          info.isSymbolicLink() ||
+          info.size !== duplicate.size ||
+          info.mtimeMs !== duplicate.mtime
+        )
+          continue;
+        const sourceHash = await hashFile(duplicate.path);
+        if (duplicate.hash && sourceHash !== duplicate.hash) continue;
+        signal.throwIfAborted();
+        const extension = path.extname(duplicate.path).slice(1).toLowerCase();
+        const file = path.join(staging, `reused-${randomUUID()}.${extension}`);
+        this.store.updateJob(job.id, { progress: { stage: 'Copying existing library audio' } });
+        this.emit('change');
+        await copyFile(duplicate.path, file, constants.COPYFILE_EXCL);
+        signal.throwIfAborted();
+        if ((await hashFile(file)) !== sourceHash)
+          throw new MusicDLError(
+            'The source file changed during copying; retry.',
+            'SOURCE_CHANGED',
+            true,
+          );
+        this.store.addHistory(
+          job,
+          'reused',
+          'Copied compatible library audio without re-encoding.',
+        );
+        return {
+          file,
+          extension,
+          info: {
+            duration: duplicate.duration,
+            codec: duplicate.codec,
+            bitrate: duplicate.bitrate,
+            tags: {},
+            hasArtwork: false,
+          },
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+    }
+    return undefined;
   }
   private complete(
     job: Job,

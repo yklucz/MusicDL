@@ -2,7 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Job, Track, LibraryTrack, LocalPlaylist, AudioFormat } from '../core/types.js';
+import type {
+  Job,
+  Track,
+  LibraryTrack,
+  LocalPlaylist,
+  AudioFormat,
+  CollectionDestination,
+} from '../core/types.js';
 
 type Row = Record<string, string | number | null>;
 export interface HistoryEntry {
@@ -22,6 +29,10 @@ export interface DownloadPlaylist {
   status: string;
   format: AudioFormat;
   error?: string | undefined;
+  destination?: CollectionDestination | undefined;
+}
+function destinationKey(destination?: CollectionDestination): string {
+  return destination ? JSON.stringify([destination.root, destination.key]) : '';
 }
 export class Store {
   private readonly db: DatabaseSync;
@@ -31,25 +42,38 @@ export class Store {
     if (file !== ':memory:' && process.platform !== 'win32') chmodSync(file, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, track_key TEXT NOT NULL, track_json TEXT NOT NULL, format TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, next_attempt_at INTEGER NOT NULL DEFAULT 0, error TEXT, output_path TEXT, file_hash TEXT, batch_id TEXT, progress_json TEXT);
-      CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_unique ON jobs(track_key,format) WHERE status IN ('queued','downloading','processing','retrying');
-      CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_isrc ON jobs(UPPER(json_extract(track_json,'$.isrc')),format) WHERE json_extract(track_json,'$.isrc') IS NOT NULL AND json_extract(track_json,'$.isrc')<>'' AND status IN ('queued','downloading','processing','retrying');
       CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS tracks (id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL, album TEXT NOT NULL, duration REAL NOT NULL, codec TEXT NOT NULL, bitrate REAL NOT NULL, size INTEGER NOT NULL, mtime REAL NOT NULL, source_key TEXT, isrc TEXT, hash TEXT);
       CREATE INDEX IF NOT EXISTS tracks_source ON tracks(source_key); CREATE INDEX IF NOT EXISTS tracks_isrc ON tracks(isrc); CREATE INDEX IF NOT EXISTS tracks_hash ON tracks(hash);
       CREATE TABLE IF NOT EXISTS playlists (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS playlist_tracks (playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE, track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY(playlist_id,track_id), UNIQUE(playlist_id,position));
       CREATE TABLE IF NOT EXISTS download_playlists (id TEXT PRIMARY KEY,name TEXT NOT NULL,tracks_json TEXT NOT NULL,playlist_id TEXT NOT NULL,output_path TEXT NOT NULL,status TEXT NOT NULL,error TEXT);
+      CREATE TABLE IF NOT EXISTS collection_destinations (collection_key TEXT NOT NULL, root TEXT NOT NULL, destination_json TEXT NOT NULL, path_key TEXT NOT NULL UNIQUE, PRIMARY KEY(collection_key,root));
       PRAGMA user_version=1;`);
-    const columns = this.db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[];
-    if (!columns.some((column) => column.name === 'audio_info_json'))
-      this.db.exec('ALTER TABLE jobs ADD COLUMN audio_info_json TEXT');
-    this.db.exec('PRAGMA user_version=2');
-    const batchColumns = this.db.prepare('PRAGMA table_info(download_playlists)').all() as {
-      name: string;
-    }[];
-    if (!batchColumns.some((column) => column.name === 'format'))
-      this.db.exec("ALTER TABLE download_playlists ADD COLUMN format TEXT NOT NULL DEFAULT 'mp3'");
-    this.db.exec('PRAGMA user_version=3');
+    // Read the schema after taking the write lock: simultaneous app starts must
+    // not both attempt the same additive migration.
+    this.transaction(() => {
+      const columns = this.db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[];
+      if (!columns.some((column) => column.name === 'audio_info_json'))
+        this.db.exec('ALTER TABLE jobs ADD COLUMN audio_info_json TEXT');
+      if (!columns.some((column) => column.name === 'destination_json'))
+        this.db.exec(
+          "ALTER TABLE jobs ADD COLUMN destination_json TEXT; ALTER TABLE jobs ADD COLUMN destination_key TEXT NOT NULL DEFAULT ''; DROP INDEX IF EXISTS jobs_active_unique; DROP INDEX IF EXISTS jobs_active_isrc;",
+        );
+      this.db
+        .exec(`CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_unique ON jobs(track_key,format,destination_key) WHERE status IN ('queued','downloading','processing','retrying');
+        CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_isrc ON jobs(UPPER(json_extract(track_json,'$.isrc')),format,destination_key) WHERE json_extract(track_json,'$.isrc') IS NOT NULL AND json_extract(track_json,'$.isrc')<>'' AND status IN ('queued','downloading','processing','retrying');`);
+      const batchColumns = this.db.prepare('PRAGMA table_info(download_playlists)').all() as {
+        name: string;
+      }[];
+      if (!batchColumns.some((column) => column.name === 'format'))
+        this.db.exec(
+          "ALTER TABLE download_playlists ADD COLUMN format TEXT NOT NULL DEFAULT 'mp3'",
+        );
+      if (!batchColumns.some((column) => column.name === 'destination_json'))
+        this.db.exec('ALTER TABLE download_playlists ADD COLUMN destination_json TEXT');
+      this.db.exec('PRAGMA user_version=4');
+    });
   }
   close(): void {
     this.db.close();
@@ -68,7 +92,7 @@ export class Store {
   addJob(job: Job): void {
     this.db
       .prepare(
-        'INSERT INTO jobs(id,track_key,track_json,format,status,attempts,created_at,updated_at,next_attempt_at,batch_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        'INSERT INTO jobs(id,track_key,track_json,format,status,attempts,created_at,updated_at,next_attempt_at,batch_id,destination_json,destination_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
       )
       .run(
         job.id,
@@ -81,6 +105,8 @@ export class Store {
         job.updatedAt,
         job.nextAttemptAt,
         job.batchId ?? null,
+        job.destination ? JSON.stringify(job.destination) : null,
+        destinationKey(job.destination),
       );
   }
   job(id: string): Job | undefined {
@@ -135,13 +161,45 @@ export class Store {
       )
       .run(...values, Date.now(), id);
   }
-  activeDuplicate(track: Track, format: string): Job | undefined {
+  activeDuplicate(
+    track: Track,
+    format: string,
+    destination?: CollectionDestination,
+  ): Job | undefined {
     const row = this.db
       .prepare(
-        "SELECT * FROM jobs WHERE (track_key=? OR (? IS NOT NULL AND UPPER(json_extract(track_json,'$.isrc'))=UPPER(?))) AND format=? AND status IN ('queued','downloading','processing','retrying')",
+        "SELECT * FROM jobs WHERE (track_key=? OR (? IS NOT NULL AND UPPER(json_extract(track_json,'$.isrc'))=UPPER(?))) AND format=? AND (? IS NULL OR destination_key=?) AND status IN ('queued','downloading','processing','retrying')",
       )
-      .get(track.key, track.isrc ?? null, track.isrc ?? null, format) as Row | undefined;
+      .get(
+        track.key,
+        track.isrc?.trim() || null,
+        track.isrc?.trim() || null,
+        format,
+        destination ? destinationKey(destination) : null,
+        destinationKey(destination),
+      ) as Row | undefined;
     return row ? this.toJob(row) : undefined;
+  }
+  collectionDestination(key: string, root: string): CollectionDestination | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT destination_json FROM collection_destinations WHERE collection_key=? AND root=?',
+      )
+      .get(key, root) as Row | undefined;
+    return row ? (JSON.parse(String(row.destination_json)) as CollectionDestination) : undefined;
+  }
+  reserveCollection(destination: CollectionDestination): CollectionDestination {
+    this.db
+      .prepare(
+        'INSERT INTO collection_destinations(collection_key,root,destination_json,path_key) VALUES(?,?,?,?) ON CONFLICT(collection_key,root) DO NOTHING',
+      )
+      .run(
+        destination.key,
+        destination.root,
+        JSON.stringify(destination),
+        destination.directory.normalize('NFC').toLowerCase(),
+      );
+    return this.collectionDestination(destination.key, destination.root)!;
   }
   addHistory(job: Job, status: string, message = ''): void {
     this.db
@@ -205,8 +263,10 @@ export class Store {
   duplicatesFor(track: Track): LibraryTrack[] {
     return (
       this.db
-        .prepare('SELECT * FROM tracks WHERE source_key=? OR (? IS NOT NULL AND isrc=?)')
-        .all(track.key, track.isrc ?? null, track.isrc ?? null) as Row[]
+        .prepare(
+          'SELECT * FROM tracks WHERE source_key=? OR (? IS NOT NULL AND UPPER(isrc)=UPPER(?))',
+        )
+        .all(track.key, track.isrc?.trim() || null, track.isrc?.trim() || null) as Row[]
     ).map((row) => this.toTrack(row));
   }
   duplicateGroups(): LibraryTrack[][] {
@@ -264,6 +324,7 @@ export class Store {
     tracks: Track[],
     outputPath: string,
     format: AudioFormat = 'mp3',
+    destination?: CollectionDestination,
   ): DownloadPlaylist {
     return this.transaction(() => {
       const playlist = this.createPlaylist(name);
@@ -275,12 +336,22 @@ export class Store {
         outputPath,
         status: 'pending',
         format,
+        destination,
       };
       this.db
         .prepare(
-          'INSERT INTO download_playlists(id,name,tracks_json,playlist_id,output_path,status,error,format) VALUES(?,?,?,?,?,?,NULL,?)',
+          'INSERT INTO download_playlists(id,name,tracks_json,playlist_id,output_path,status,error,format,destination_json) VALUES(?,?,?,?,?,?,NULL,?,?)',
         )
-        .run(batch.id, name, JSON.stringify(tracks), playlist.id, outputPath, 'pending', format);
+        .run(
+          batch.id,
+          name,
+          JSON.stringify(tracks),
+          playlist.id,
+          outputPath,
+          'pending',
+          format,
+          destination ? JSON.stringify(destination) : null,
+        );
       return batch;
     });
   }
@@ -294,6 +365,9 @@ export class Store {
       status: String(r.status),
       format: r.format as AudioFormat,
       error: r.error ? String(r.error) : undefined,
+      destination: r.destination_json
+        ? (JSON.parse(String(r.destination_json)) as CollectionDestination)
+        : undefined,
     }));
   }
   finishDownloadPlaylist(id: string, status: string, error?: string): void {
@@ -320,6 +394,9 @@ export class Store {
         : undefined,
       audioInfo: r.audio_info_json
         ? (JSON.parse(String(r.audio_info_json)) as Job['audioInfo'])
+        : undefined,
+      destination: r.destination_json
+        ? (JSON.parse(String(r.destination_json)) as CollectionDestination)
         : undefined,
     };
   }

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { ProcessRunner } from './core/process.js';
 import type { Runner } from './core/process.js';
-import type { AudioFormat, SelectionFlags, Track } from './core/types.js';
+import type { AudioFormat, SelectionFlags, Selection } from './core/types.js';
 import { MusicDLError } from './core/errors.js';
 import { safeSegment } from './core/safety.js';
 import type { PromptPort } from './prompts.js';
@@ -12,6 +12,7 @@ import { Resolver, selectTracks } from './resolver.js';
 import { AudioProcessor } from './audio/processor.js';
 import { createPipeline } from './downloads/source.js';
 import { DownloadManager } from './downloads/manager.js';
+import { collectionKey } from './downloads/collections.js';
 import { Library } from './library.js';
 import { PlaylistManager } from './playlists.js';
 
@@ -130,8 +131,7 @@ export class MusicDL {
     if (flags.single && flags.playlist)
       throw new MusicDLError('--single and --playlist cannot be used together.', 'SELECTION');
     const parsed = splitInput(input),
-      tracks: Track[] = [];
-    let collectionName: string | undefined;
+      selections: Selection[] = [];
     if (parsed.urls) {
       for (const url of parsed.urls) {
         prompts.note('Reading provider metadata…');
@@ -149,8 +149,7 @@ export class MusicDL {
             'spotDL reads Spotify metadata and usually matches audio from YouTube; it does not download Spotify’s original streams. Matches may differ from the release.',
           );
         const selected = await selectTracks(this.resolver, resolved, flags, prompts, signal);
-        tracks.push(...selected.tracks);
-        collectionName ??= selected.collection?.title;
+        selections.push(selected);
       }
     } else {
       if (!prompts.interactive)
@@ -168,9 +167,25 @@ export class MusicDL {
           })),
         ),
       );
-      tracks.push(...results.filter((t) => keys.has(t.key)));
+      selections.push({ tracks: results.filter((t) => keys.has(t.key)) });
     }
-    const unique = [...new Map(tracks.map((track) => [track.key, track])).values()];
+    const groups = new Map<string, Selection>();
+    for (const selection of selections) {
+      const key =
+        this.config.playlistFolders && selection.collection
+          ? collectionKey(selection.collection)
+          : 'standalone';
+      const group = groups.get(key) ?? { tracks: [], collection: selection.collection };
+      group.collection ??= selection.collection;
+      group.tracks = [
+        ...new Map(
+          [...group.tracks, ...selection.tracks].map((track) => [track.key, track]),
+        ).values(),
+      ];
+      groups.set(key, group);
+    }
+    const unique = [...groups.values()].flatMap((group) => group.tracks);
+    const collectionName = selections.find((selection) => selection.collection)?.collection?.title;
     if (!unique.length) {
       prompts.note('No tracks selected.');
       return { added: 0, skipped: 0 };
@@ -200,21 +215,42 @@ export class MusicDL {
     if (playlist === undefined && collectionName && prompts.interactive)
       playlist = await prompts.confirm('Create a local M3U8 playlist after downloading?', false);
     signal.throwIfAborted();
-    const result = await this.manager.enqueue(unique, flags.format ?? this.config.format);
-    if (playlist) {
-      const name =
-        typeof playlist === 'string' ? playlist : (collectionName ?? 'MusicDL Downloads');
-      this.store.createDownloadPlaylist(
-        name,
-        unique,
-        path.join(this.config.downloadsDir, 'Playlists', `${safeSegment(name)}.m3u8`),
+    let added = 0,
+      skipped = 0;
+    const folders: string[] = [];
+    for (const group of groups.values()) {
+      signal.throwIfAborted();
+      if (!group.tracks.length) continue;
+      const result = await this.manager.enqueue(
+        group.tracks,
         flags.format ?? this.config.format,
+        undefined,
+        group.collection,
       );
+      added += result.added.length;
+      skipped += result.skipped.length;
+      if (result.destination) folders.push(path.basename(result.destination.directory));
+      if (playlist) {
+        const name =
+          typeof playlist === 'string'
+            ? playlist
+            : (group.collection?.title ?? 'MusicDL Downloads');
+        this.store.createDownloadPlaylist(
+          name,
+          group.tracks,
+          path.join(
+            result.destination?.directory ?? path.join(this.config.downloadsDir, 'Playlists'),
+            `${safeSegment(name)}.m3u8`,
+          ),
+          flags.format ?? this.config.format,
+          result.destination,
+        );
+      }
     }
     await this.manager.syncPlaylists();
     prompts.note(
-      `Queued ${result.added.length} track${result.added.length === 1 ? '' : 's'}${result.skipped.length ? ` · ${result.skipped.length} duplicates skipped` : ''}.`,
+      `Queued ${added} track${added === 1 ? '' : 's'}${skipped ? ` · ${skipped} duplicates skipped` : ''}.${folders.length ? `\nCollection folders: ${[...new Set(folders)].join(', ')}` : ''}`,
     );
-    return { added: result.added.length, skipped: result.skipped.length };
+    return { added, skipped };
   }
 }

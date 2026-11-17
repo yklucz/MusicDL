@@ -185,6 +185,37 @@ describe.skipIf(!available)('authorized local HTTP audio end to end', () => {
       processor.process(opus.file, await mkdtemp(path.join(root, 'lossy-')), 'flac', track),
     ).rejects.toThrow('lossless');
   });
+  it('copies genuine tagged audio and embedded artwork into two playlist folders unchanged', async () => {
+    const original = app.store
+      .jobs()
+      .find((job) => job.format === 'mp3' && job.status === 'completed')!;
+    const before = await readFile(original.outputPath!);
+    for (const name of ['Collection One', 'Bộ sưu tập 二']) {
+      const request = await app.manager.enqueue([original.track], 'mp3', undefined, {
+        id: name,
+        url: `${baseUrl}/playlist/${encodeURIComponent(name)}`,
+        title: name,
+        kind: 'playlist',
+        tracks: [original.track],
+        totalCount: 1,
+        unavailableCount: 0,
+      });
+      expect(request.added).toHaveLength(1);
+    }
+    await app.manager.start();
+    await app.manager.drain();
+    await app.manager.stop();
+    for (const name of ['Collection One', 'Bộ sưu tập 二']) {
+      const file = path.join(app.config.downloadsDir, name, 'Bài kiểm tra - MusicDL Test.mp3');
+      expect(await readFile(file)).toEqual(before);
+      const info = await app.audio.probe(file);
+      expect(info.hasArtwork).toBe(true);
+      expect(info.tags.title).toBe('Bài kiểm tra');
+      expect(info.codec).toBe('mp3');
+    }
+    expect(await readFile(original.outputPath!)).toEqual(before);
+    expect(app.store.history().filter((entry) => entry.status === 'reused')).toHaveLength(2);
+  });
   it('downloads a real lossless URL to FLAC without requiring codec metadata in the URL resolver', async () => {
     const resolved = await app.resolver.resolve(`${baseUrl}/lossless-tone.wav`);
     if (resolved.kind !== 'track') throw new Error('Expected track');

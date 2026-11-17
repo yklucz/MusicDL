@@ -10,6 +10,7 @@
   "largeBatchThreshold": 20,
   "theme": "aurora",
   "createPlaylist": false,
+  "playlistFolders": true,
   "allowLocalUrls": false,
   "tools": {
     "ytdlp": "yt-dlp",

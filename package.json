@@ -28,6 +28,8 @@
     "bin",
     "dist",
     "scripts",
+    "install.sh",
+    "install.ps1",
     "README.md",
     "config.example.json",
     "LICENSE"
