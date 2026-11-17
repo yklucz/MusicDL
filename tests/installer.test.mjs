@@ -802,3 +802,74 @@ test('uv rejects a mismatching static release checksum before extracting executa
     await assert.rejects(setupTools(options), /checksum integrity/i);
     await assert.rejects(access(path.join(f.root, '.tools', 'uv-0.13.8', 'uv')));
   }));
+
+test('Windows environment merge honors mixed-case Path precedence without mutating caller state', () =>
+  fixture(async (f) => {
+    const media = path.join(f.base, 'media tools');
+    const tail = `${media};C:\\Windows\\System32`;
+    const env = { Path: tail, Shell: '/bin/zsh' };
+    const before = { ...process.env };
+    const options = harness({
+      ...f,
+      platform: 'win32',
+      arch: 'x64',
+      pnpm: '/portable/pnpm.mjs',
+      env,
+    });
+    const original = options.exec;
+    options.exec = async (cmd, args, invocation) => {
+      if (cmd === 'ffmpeg' || cmd === 'ffprobe' || args.includes('doctor')) {
+        const keys = Object.keys(invocation.env).filter((key) => key.toLowerCase() === 'path');
+        assert.deepEqual(
+          keys,
+          ['PATH'],
+          'Windows child environment must contain a single canonical PATH',
+        );
+        assert.ok(
+          invocation.env.PATH.endsWith(tail),
+          'existing media/system PATH entries must survive tool prefixes',
+        );
+      }
+      return original(cmd, args);
+    };
+    await install(options);
+    assert.deepEqual(env, { Path: tail, Shell: '/bin/zsh' });
+    assert.deepEqual({ ...process.env }, before);
+  }));
+
+test(
+  'native Windows discovers existing media tools from a mixed-case Path input',
+  { skip: process.platform !== 'win32' },
+  () =>
+    fixture(async (f) => {
+      const media = path.join(f.base, 'native media tools');
+      await mkdir(media);
+      for (const name of ['ffmpeg', 'ffprobe'])
+        await writeFile(
+          path.join(media, `${name}.cmd`),
+          `@echo off\r\necho controlled ${name} version\r\n`,
+        );
+      const options = harness({
+        ...f,
+        platform: 'win32',
+        arch: process.arch,
+        pnpm: '/portable/pnpm.mjs',
+        env: { Path: media },
+      });
+      const original = options.exec;
+      options.exec = async (cmd, args, invocation) => {
+        if (cmd === 'ffmpeg' || cmd === 'ffprobe') {
+          const child = spawnSync(
+            process.env.ComSpec,
+            ['/d', '/s', '/c', `${cmd} ${args.join(' ')}`],
+            { encoding: 'utf8', env: invocation.env, windowsVerbatimArguments: true },
+          );
+          if (child.status === 0)
+            assert.match(child.stdout, new RegExp(`controlled ${cmd} version`));
+          return { status: child.status, stdout: child.stdout, stderr: child.stderr };
+        }
+        return original(cmd, args);
+      };
+      await install(options);
+    }),
+);

@@ -466,7 +466,12 @@ function defaults(options) {
     download,
     ...options,
   };
-  o.env = { ...process.env, ...(options?.env ?? {}) };
+  o.env = {};
+  for (const source of [process.env, options?.env ?? {}]) {
+    for (const [key, value] of Object.entries(source)) {
+      o.env[o.platform === 'win32' ? key.toUpperCase() : key] = value;
+    }
+  }
   // Keep downloaded Python, cache, and managed executables inside this checkout.
   o.env.UV_PYTHON_INSTALL_DIR = path.join(o.root, '.tools', 'python');
   o.env.UV_CACHE_DIR = path.join(o.root, '.tools', 'uv-cache');
